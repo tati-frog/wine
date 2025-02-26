@@ -8557,7 +8557,6 @@ static void test_ddrawstream_mem_allocator(void) {
     IPin *ddraw_pin;
     HRESULT hr;
 
-    ok(0, "just making sure I compiled it right.\n");
     hr = IAMMultiMediaStream_Initialize(mmstream, STREAMTYPE_READ, 0, NULL);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
@@ -8576,7 +8575,14 @@ static void test_ddrawstream_mem_allocator(void) {
     hr = IMemInputPin_GetAllocator(mem_input, &mem_allocator);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
-    IMemAllocator_Release(mem_allocator);
+    if (mem_allocator)
+        IMemAllocator_Release(mem_allocator);
+
+    hr = IDirectDrawMediaStream_QueryInterface(ddraw_stream, &IID_IMemAllocator, (void**)&mem_allocator);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    if (mem_allocator)
+        IMemAllocator_Release(mem_allocator);
     IPin_Release(ddraw_pin);
     IDirectDrawMediaStream_Release(ddraw_stream);
     IMediaStream_Release(stream);
