@@ -8189,10 +8189,11 @@ static void test_ddrawstream_create_sample(const WCHAR *test_avi_path)
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
     memset(&desc, 0, sizeof(desc));
+    desc = rgb565_format;
     desc.dwSize = sizeof(desc);
-    desc.dwFlags = DDSD_WIDTH | DDSD_HEIGHT;
+    desc.dwFlags = DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
     desc.dwWidth = 32;
-    desc.dwHeight = 23; /* The original height for test.avi is 24. */
+    desc.dwHeight = 24;
     hr = IDirectDraw_CreateSurface(ddraw, &desc, &surface, NULL);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
