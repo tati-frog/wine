@@ -8547,6 +8547,42 @@ static void test_ddrawstream_qc(void)
     ok(!ref, "Got outstanding refcount %ld.\n", ref);
 }
 
+static void test_ddrawstream_mem_allocator(void) {
+    IAMMultiMediaStream *mmstream = create_ammultimediastream();
+    IDirectDrawMediaStream *ddraw_stream;
+    IMemAllocator *mem_allocator;
+    IMemInputPin *mem_input;
+    IMediaStream *stream;
+    IPin *ddraw_pin;
+    HRESULT hr;
+
+    ok(0, "just making sure I compiled it right.\n");
+    hr = IAMMultiMediaStream_Initialize(mmstream, STREAMTYPE_READ, 0, NULL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IAMMultiMediaStream_AddMediaStream(mmstream, NULL, &MSPID_PrimaryVideo, 0, &stream);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IMediaStream_QueryInterface(stream, &IID_IDirectDrawMediaStream, (void**)&ddraw_stream);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectDrawMediaStream_QueryInterface(ddraw_stream, &IID_IPin, (void**)&ddraw_pin);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IPin_QueryInterface(ddraw_pin, &IID_IMemInputPin, (void**)&mem_input);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IMemInputPin_GetAllocator(mem_input, &mem_allocator);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    IMemAllocator_Release(mem_allocator);
+    IPin_Release(ddraw_pin);
+    IDirectDrawMediaStream_Release(ddraw_stream);
+    IMediaStream_Release(stream);
+    IAMMultiMediaStream_Release(mmstream);
+}
+
+
 static void test_ddrawstreamsample_get_media_stream(void)
 {
     IAMMultiMediaStream *mmstream = create_ammultimediastream();
@@ -9872,6 +9908,7 @@ START_TEST(amstream)
     test_ddrawstream_new_segment();
     test_ddrawstream_get_time_per_frame();
     test_ddrawstream_qc();
+    test_ddrawstream_mem_allocator();
     unload_resource(test_avi_path);
 
     test_ddrawstreamsample_get_media_stream();
