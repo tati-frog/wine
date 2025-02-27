@@ -62,6 +62,8 @@ struct ddraw_stream
     REFERENCE_TIME segment_start;
     BOOL eos;
     BOOL flushing;
+    BOOL change_media_type;
+    BOOL using_own_allocator;
     CONDITION_VARIABLE update_queued_cv;
     struct list update_queue;
 };
@@ -539,6 +541,25 @@ static HRESULT WINAPI ddraw_IDirectDrawMediaStream_GetFormat(IDirectDrawMediaStr
     return S_OK;
 }
 
+void set_media_type_from_surfacedesc(AM_MEDIA_TYPE *mt, const DDSURFACEDESC *format)
+{
+    VIDEOINFOHEADER *videoinfo;
+
+    videoinfo = (VIDEOINFOHEADER*)mt->pbFormat;
+    videoinfo->bmiHeader.biWidth = format->dwWidth;
+    videoinfo->bmiHeader.biHeight = format->dwHeight;
+
+    if (format->ddpfPixelFormat.dwRGBBitCount == 16 && format->ddpfPixelFormat.dwRBitMask == 0x7c00) {
+        mt->subtype = MEDIASUBTYPE_RGB555;
+    } else if (format->ddpfPixelFormat.dwRGBBitCount == 16 && format->ddpfPixelFormat.dwRBitMask == 0x7c00) {
+        mt->subtype = MEDIASUBTYPE_RGB565;
+    } else if (format->ddpfPixelFormat.dwRGBBitCount == 24) {
+        mt->subtype = MEDIASUBTYPE_RGB24;
+    } else if (format->ddpfPixelFormat.dwRGBBitCount == 32) {
+        mt->subtype = MEDIASUBTYPE_RGB32;
+    }
+}
+
 static HRESULT WINAPI ddraw_IDirectDrawMediaStream_SetFormat(IDirectDrawMediaStream *iface,
         const DDSURFACEDESC *format, IDirectDrawPalette *palette)
 {
@@ -629,38 +650,55 @@ static HRESULT WINAPI ddraw_IDirectDrawMediaStream_SetFormat(IDirectDrawMediaStr
 
     if (stream->peer && !is_format_compatible(stream, old_format.width, old_format.height, &old_format.pf))
     {
-        hr = IMultiMediaStream_GetState(stream->parent, &state);
-        if (FAILED(hr) || state == STREAMSTATE_RUN)
-        {
-            stream->format = old_format;
-            LeaveCriticalSection(&stream->cs);
-            return DDERR_INVALIDSURFACETYPE;
-        }
-        hr = CopyMediaType(&old_media_type, &stream->mt);
-        if (FAILED(hr))
-        {
-            stream->format = old_format;
-            LeaveCriticalSection(&stream->cs);
-            return hr;
-        }
-        old_peer = stream->peer;
-        IPin_AddRef(old_peer);
+        if (stream->using_own_allocator) {
+            TRACE("Using dynamic format.\n");
+            hr = CopyMediaType(&old_media_type, &stream->mt);
+            if (FAILED(hr))
+            {
+                stream->format = old_format;
+                LeaveCriticalSection(&stream->cs);
+                return hr;
+            }
 
-        IFilterGraph_Disconnect(stream->graph, stream->peer);
-        IFilterGraph_Disconnect(stream->graph, &stream->IPin_iface);
-        hr = IFilterGraph_ConnectDirect(stream->graph, old_peer, &stream->IPin_iface, NULL);
-        if (FAILED(hr))
-        {
-            stream->format = old_format;
-            IFilterGraph_ConnectDirect(stream->graph, old_peer, &stream->IPin_iface, &old_media_type);
+            set_media_type_from_surfacedesc(&stream->mt, format);
+            /* How to build the new media type? */
+            hr = IPin_QueryAccept(stream->peer, &stream->mt);
+            if (hr != S_OK) {
+                ERR("Out pin doesn't support media type, falling back to reconnection. %#lx\n", hr);
+                stream->format = old_format;
+                goto RECONNECT;
+            }
+
+            stream->change_media_type = TRUE;
+        } else {
+            TRACE("Falling back to reconnection\n");
+            RECONNECT:
+            hr = CopyMediaType(&old_media_type, &stream->mt);
+            if (FAILED(hr))
+            {
+                stream->format = old_format;
+                LeaveCriticalSection(&stream->cs);
+                return hr;
+            }
+            old_peer = stream->peer;
+            IPin_AddRef(old_peer);
+
+            IFilterGraph_Disconnect(stream->graph, stream->peer);
+            IFilterGraph_Disconnect(stream->graph, &stream->IPin_iface);
+            hr = IFilterGraph_ConnectDirect(stream->graph, old_peer, &stream->IPin_iface, NULL);
+            if (FAILED(hr))
+            {
+                stream->format = old_format;
+                IFilterGraph_ConnectDirect(stream->graph, old_peer, &stream->IPin_iface, &old_media_type);
+                IPin_Release(old_peer);
+                FreeMediaType(&old_media_type);
+                LeaveCriticalSection(&stream->cs);
+                return DDERR_INVALIDSURFACETYPE;
+            }
+
             IPin_Release(old_peer);
             FreeMediaType(&old_media_type);
-            LeaveCriticalSection(&stream->cs);
-            return DDERR_INVALIDSURFACETYPE;
         }
-
-        IPin_Release(old_peer);
-        FreeMediaType(&old_media_type);
     }
 
     LeaveCriticalSection(&stream->cs);
@@ -1317,56 +1355,65 @@ static HRESULT WINAPI ddraw_mem_allocator_SetProperties(IMemAllocator *iface, AL
 {
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
-    return IMemAllocator_SetProperties(iface, request, actual);
+    return IMemAllocator_SetProperties(stream->allocator, request, actual);
 }
 
 static HRESULT WINAPI ddraw_mem_allocator_GetProperties(IMemAllocator *iface,ALLOCATOR_PROPERTIES *props)
 {
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
-    return IMemAllocator_GetProperties(iface, props);
+    return IMemAllocator_GetProperties(stream->allocator, props);
 }
 
 static HRESULT WINAPI ddraw_mem_allocator_Commit(IMemAllocator *iface)
 {
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
-    return IMemAllocator_Commit(iface);
+    return IMemAllocator_Commit(stream->allocator);
 }
 
 static HRESULT WINAPI ddraw_mem_allocator_Decommit(IMemAllocator *iface)
 {
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
-    return IMemAllocator_Decommit(iface);
+    return IMemAllocator_Decommit(stream->allocator);
 }
 
 static HRESULT WINAPI ddraw_mem_allocator_GetBuffer(IMemAllocator *iface, IMediaSample **buf,
                                                     REFERENCE_TIME *start_time, REFERENCE_TIME *end_time,
                                                     DWORD flags)
 {
+    HRESULT hr;
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
+    if (stream->change_media_type) {
+        hr = IMemAllocator_GetBuffer(stream->allocator, buf, start_time, end_time, flags);
+        if (FAILED(hr)) return hr;
+
+        IMediaSample_SetMediaType(*buf, &stream->mt);
+        stream->change_media_type = FALSE;
+        return hr;
+    }
     return IMemAllocator_GetBuffer(stream->allocator, buf, start_time, end_time, flags);
 }
 
@@ -1374,11 +1421,11 @@ static HRESULT WINAPI ddraw_mem_allocator_ReleaseBuffer(IMemAllocator *iface,IMe
 {
     struct ddraw_stream *stream = impl_from_IMemAllocator(iface);
 
-    if (stream->allocator != &stream->IMemAllocator_iface) {
+    if (!stream->using_own_allocator) {
         return E_FAIL;
     }
 
-    return IMemAllocator_ReleaseBuffer(iface, buf);
+    return IMemAllocator_ReleaseBuffer(stream->allocator, buf);
 }
 
 static const IMemAllocatorVtbl ddraw_mem_allocator_vtbl =
@@ -1429,8 +1476,10 @@ static HRESULT WINAPI ddraw_meminput_GetAllocator(IMemInputPin *iface, IMemAlloc
         hr = CoCreateInstance(&CLSID_MemoryAllocator, NULL, CLSCTX_INPROC_SERVER,
             &IID_IMemAllocator, (void **)&stream->allocator);
         if (!SUCCEEDED(hr)) return E_FAIL;
+
+        stream->using_own_allocator = TRUE;
     }
-    IMemAllocator_AddRef(*allocator = stream->allocator);
+    IMemAllocator_AddRef(*allocator = &stream->IMemAllocator_iface);
     return S_OK;
 }
 
@@ -1442,6 +1491,9 @@ static HRESULT WINAPI ddraw_meminput_NotifyAllocator(IMemInputPin *iface, IMemAl
 
     if (!allocator)
         return E_POINTER;
+
+    if (stream->using_own_allocator)
+        return S_OK;
 
     if (allocator)
         IMemAllocator_AddRef(allocator);
@@ -1607,6 +1659,8 @@ HRESULT ddraw_stream_create(IUnknown *outer, void **out)
     object->IMemAllocator_iface.lpVtbl = &ddraw_mem_allocator_vtbl;
     object->IPin_iface.lpVtbl = &ddraw_sink_vtbl;
     object->ref = 1;
+
+    object->using_own_allocator = FALSE;
 
     object->format.width = 100;
     object->format.height = 100;
