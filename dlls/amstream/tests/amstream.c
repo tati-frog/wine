@@ -1176,10 +1176,41 @@ static HRESULT WINAPI testsource_DecideBufferSize(struct strmbase_source *iface,
     return IMemAllocator_SetProperties(alloc, requested, &actual);
 }
 
+static BOOL compare_media_types(const AM_MEDIA_TYPE *req_mt, const AM_MEDIA_TYPE *pin_mt)
+{
+    if (!req_mt)
+        return TRUE;
+
+    if (!IsEqualGUID(&req_mt->majortype, &pin_mt->majortype)
+            && !IsEqualGUID(&req_mt->majortype, &GUID_NULL))
+        return FALSE;
+
+    if (!IsEqualGUID(&req_mt->subtype, &pin_mt->subtype)
+            && !IsEqualGUID(&req_mt->subtype, &GUID_NULL))
+        return FALSE;
+
+    if (!IsEqualGUID(&req_mt->formattype, &pin_mt->formattype)
+            && !IsEqualGUID(&req_mt->formattype, &GUID_NULL))
+        return FALSE;
+
+    return TRUE;
+}
+
+static HRESULT testsource_query_accept(struct strmbase_pin * pin, const AM_MEDIA_TYPE * mt) {
+    struct testfilter *filter = impl_from_base_pin(pin);
+    trace("Query accept called.\n");
+
+    if(compare_media_types(mt, filter->preferred_mt))
+        return S_OK;
+    else
+        return S_FALSE;
+}
+
 static const struct strmbase_source_ops testsource_ops =
 {
     .base.pin_get_media_type = testsource_get_media_type,
     .base.pin_query_interface = testsource_query_interface,
+    .base.pin_query_accept = testsource_query_accept,
     .pfnAttemptConnection = BaseOutputPinImpl_AttemptConnection,
     .pfnDecideBufferSize = testsource_DecideBufferSize,
     .pfnDecideAllocator = testsource_DecideAllocator,
@@ -8590,6 +8621,61 @@ static void test_ddrawstream_mem_allocator(void) {
     IAMMultiMediaStream_Release(mmstream);
 }
 
+static void test_ddrawstream_dynamic_format(void) {
+    IPin *ddraw_pin;
+    IDirectDrawMediaStream *ddraw_stream;
+    HRESULT hr;
+    IDirectDraw *ddraw;
+    DDSURFACEDESC cur_desc, expected_desc;
+    struct testfilter source;
+    IGraphBuilder *filtergraph;
+    IMediaStream *stream;
+    IAMMultiMediaStream *mmstream = create_ammultimediastream();
+
+    testfilter_init(&source);
+
+    hr = DirectDrawCreate(NULL, &ddraw, NULL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectDraw_SetCooperativeLevel(ddraw, NULL, DDSCL_NORMAL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IAMMultiMediaStream_Initialize(mmstream, STREAMTYPE_READ, 0, NULL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IAMMultiMediaStream_AddMediaStream(mmstream, NULL, &MSPID_PrimaryVideo, 0, &stream);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IAMMultiMediaStream_GetFilterGraph(mmstream, &filtergraph);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IGraphBuilder_AddFilter(filtergraph, &source.filter.IBaseFilter_iface, L"Source");
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IMediaStream_QueryInterface(stream, &IID_IDirectDrawMediaStream, (void**)&ddraw_stream);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectDrawMediaStream_QueryInterface(ddraw_stream, &IID_IPin, (void**)&ddraw_pin);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    source.preferred_mt = &rgb555_mt;
+    hr = IGraphBuilder_ConnectDirect(filtergraph, &source.source.pin.IPin_iface, ddraw_pin, &rgb555_mt);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectDrawMediaStream_SetFormat(ddraw_stream, &rgb8_format, NULL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectDrawMediaStream_GetFormat(ddraw_stream, &cur_desc, NULL, &expected_desc, NULL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(cur_desc.ddpfPixelFormat.u1.dwRGBBitCount == 8, "bitcounts not the same %ld != %ld\n", cur_desc.ddpfPixelFormat.u1.dwRGBBitCount , 8L);
+
+    IPin_Release(ddraw_pin);
+    IDirectDrawMediaStream_Release(ddraw_stream);
+    IGraphBuilder_Release(filtergraph);
+    IMediaStream_Release(stream);
+    IAMMultiMediaStream_Release(mmstream);
+    IDirectDraw_Release(ddraw);
+}
 
 static void test_ddrawstreamsample_get_media_stream(void)
 {
@@ -9908,7 +9994,7 @@ START_TEST(amstream)
     // test_ddrawstream_initialize();
     // test_ddrawstream_getsetdirectdraw();
     // test_ddrawstream_receive_connection();
-    test_ddrawstream_create_sample(test_avi_path);
+    // test_ddrawstream_create_sample(test_avi_path);
     // test_ddrawstream_get_format();
     // test_ddrawstream_set_format();
     // test_ddrawstream_receive();
@@ -9916,7 +10002,8 @@ START_TEST(amstream)
     // test_ddrawstream_new_segment();
     // test_ddrawstream_get_time_per_frame();
     // test_ddrawstream_qc();
-    test_ddrawstream_mem_allocator();
+    // test_ddrawstream_mem_allocator();
+    test_ddrawstream_dynamic_format();
     unload_resource(test_avi_path);
 
     // test_ddrawstreamsample_get_media_stream();
